@@ -36,12 +36,38 @@
 
 #include <nuttx/fs/fs.h>
 
+#ifdef CONFIG_VIDEO_FB
+#  include <nuttx/kthread.h>
+#  include <nuttx/video/fb.h>
+#endif
+
 #include "esp_board_ledc.h"
 #include "esp_board_spiflash.h"
 #include "esp_board_i2c.h"
 #include "esp_board_bmp180.h"
 
 #include "espressif/esp_start.h"
+
+#ifdef CONFIG_VIDEO_FB
+static int esp_fb_init_thread(int argc, char *argv[])
+{
+  int ret;
+
+  syslog(LOG_INFO, "MIPI: framebuffer initialization started\n");
+  ret = fb_register(0, 0);
+  if (ret < 0)
+    {
+      syslog(LOG_ERR, "ERROR: Failed to register MIPI framebuffer: %d\n",
+             ret);
+    }
+  else
+    {
+      syslog(LOG_INFO, "MIPI: /dev/fb0 registered\n");
+    }
+
+  return ret;
+}
+#endif
 
 #ifdef CONFIG_WATCHDOG
 #  include "espressif/esp_wdt.h"
@@ -164,7 +190,18 @@ int esp_bringup(void)
 {
   int ret = OK;
 
-  printf("Mount procfs at /proc: %d\n", ret);
+#ifdef CONFIG_VIDEO_FB
+  syslog(LOG_INFO, "MIPI: starting framebuffer task\n");
+  int fbret = kthread_create("mipi_fb", SCHED_PRIORITY_DEFAULT, 4096,
+                             esp_fb_init_thread, NULL);
+  if (fbret < 0)
+    {
+      syslog(LOG_ERR, "ERROR: Failed to start MIPI framebuffer task: %d\n",
+             fbret);
+    }
+#endif
+
+  syslog(LOG_INFO, "Mount procfs at /proc: %d\n", ret);
 #ifdef CONFIG_FS_PROCFS
   /* Mount the procfs file system */
 
@@ -174,7 +211,7 @@ int esp_bringup(void)
       _err("Failed to mount procfs at /proc: %d\n", ret);
     }
   _err("Mount procfs at /proc: %d\n", ret);
-  printf("Mount procfs at /proc: %d\n", ret);
+  syslog(LOG_INFO, "Mount procfs at /proc: %d\n", ret);
 #endif
 
 #ifdef CONFIG_FS_TMPFS

@@ -194,6 +194,10 @@ if(CONFIG_ESPRESSIF_TOUCH)
   list(APPEND SRCS esp_touch.c)
 endif()
 
+if(CONFIG_ESPRESSIF_MIPI_DSI)
+  list(APPEND SRCS esp_mipi_dsi.c)
+endif()
+
 if(CONFIG_COMP)
   list(APPEND SRCS esp_ana_cmpr.c)
 endif()
@@ -233,7 +237,7 @@ if(DEFINED ENV{ESP_HAL_3RDPARTY_URL})
       CACHE STRING "ESP HAL 3rdparty URL")
 else()
   set(ESP_HAL_3RDPARTY_URL
-      ncepu-pi:/git/esp-hal-3rdparty.git
+      https://github.com/espressif/esp-hal-3rdparty.git
       CACHE STRING "ESP HAL 3rdparty URL")
 endif()
 
