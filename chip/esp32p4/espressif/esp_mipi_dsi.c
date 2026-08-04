@@ -40,7 +40,7 @@
 
 #define DSI_BUS                 0
 #define DSI_LANES               2
-#define DSI_LANE_RATE_MBPS      1000
+#define DSI_LANE_RATE_MBPS      650
 #define DSI_PHY_REF_HZ          40000000
 #define DSI_POLL_LOOPS          100000
 
@@ -51,11 +51,19 @@
 #define LCD_FB_SIZE             (LCD_STRIDE * LCD_HEIGHT)
 
 #define LCD_HSYNC               10
-#define LCD_HBP                 120
-#define LCD_HFP                 120
+#define LCD_HBP                 160
+#define LCD_HFP                 160
 #define LCD_VSYNC               1
-#define LCD_VBP                 20
-#define LCD_VFP                 10
+#define LCD_VBP                 23
+#define LCD_VFP                 12
+
+/* Enable EK79007 internal BIST for diagnostic mode.  BIST does not require
+ * DCLK and can verify whether the panel is actually receiving commands.
+ * The DSI host VPG is also enabled; if BIST shows full-screen patterns,
+ * the panel is receiving commands correctly.
+ */
+
+#define LCD_EK79007_BIST        1
 
 struct esp_dsi_s
 {
@@ -179,6 +187,26 @@ static int esp_dsi_wait_payload_space(struct esp_dsi_s *priv)
   return -ETIMEDOUT;
 }
 
+static int esp_dsi_wait_tx_done(struct esp_dsi_s *priv)
+{
+  unsigned int n;
+
+  for (n = 0; n < DSI_POLL_LOOPS; n++)
+    {
+      if (mipi_dsi_host_ll_gen_is_cmd_fifo_empty(priv->hal.host) &&
+          mipi_dsi_host_ll_gen_is_write_fifo_empty(priv->hal.host))
+        {
+          return OK;
+        }
+    }
+
+  syslog(LOG_ERR,
+         "ERROR: MIPI command transmit timeout (status=%08lx int=%08lx)\n",
+         (unsigned long)priv->hal.host->cmd_pkt_status.val,
+         (unsigned long)priv->hal.host->int_st0.val);
+  return -ETIMEDOUT;
+}
+
 static ssize_t esp_dsi_transfer(struct mipi_dsi_host *host,
                                 const struct mipi_dsi_msg *msg)
 {
@@ -246,7 +274,14 @@ static ssize_t esp_dsi_transfer(struct mipi_dsi_host *host,
       mipi_dsi_host_ll_gen_set_packet_header(priv->hal.host, msg->channel,
                                               msg->type, header >> 8,
                                               header & 0xff);
-      ret = msg->tx_len;
+      ret = esp_dsi_wait_tx_done(priv);
+      if (ret >= 0)
+        {
+          /* Keep vendor writes serialized beyond the FIFO boundary. */
+
+          up_udelay(1000);
+          ret = msg->tx_len;
+        }
     }
 
 out:
@@ -303,6 +338,112 @@ static int esp_dsi_dcs(uint8_t cmd, const uint8_t *data, size_t len)
   syslog(ret < 0 ? LOG_ERR : LOG_INFO,
          "MIPI: DCS write cmd=%02x result=%ld\n", cmd, (long)ret);
   return ret < 0 ? -EIO : OK;
+}
+
+/* Single-shot DCS read with BTA and full RX cleanup.
+ *
+ * This reads one DCS response from the panel.  BTA is enabled only for the
+ * duration of this call and disabled again on exit, so it does not interfere
+ * with the normal LPDT command path used for panel initialization.
+ *
+ * Returns the number of bytes read (1-4) on success, or a negative errno.
+ */
+
+static int esp_dsi_read_dcs_cmd(struct esp_dsi_s *priv, uint8_t cmd,
+                                uint8_t *buf, size_t max_len)
+{
+  unsigned int n;
+  uint32_t val;
+  int ret;
+
+  if (priv == NULL || buf == NULL || max_len == 0)
+    {
+      return -EINVAL;
+    }
+
+  /* Drain any stale data in the RX FIFO before starting a new read. */
+
+  while (!mipi_dsi_host_ll_gen_is_read_fifo_empty(priv->hal.host))
+    {
+      (void)mipi_dsi_host_ll_gen_read_payload_fifo(priv->hal.host);
+    }
+
+  /* Enable BTA for this read only. */
+
+  mipi_dsi_host_ll_enable_bta(priv->hal.host, true);
+
+  /* Send DCS read request: DCS_READ_0 (0x06) with the command byte. */
+
+  mipi_dsi_host_ll_gen_set_packet_header(priv->hal.host, 0,
+                                          MIPI_DSI_DT_DCS_READ_0, 0, cmd);
+
+  /* Wait for the read response to arrive.  The host sets the read-command-
+   * busy flag while waiting for the panel response, and data appears in the
+   * RX FIFO once the BTA turnaround completes.
+   */
+
+  ret = -ETIMEDOUT;
+  for (n = 0; n < DSI_POLL_LOOPS; n++)
+    {
+      if (!mipi_dsi_host_ll_gen_is_read_fifo_empty(priv->hal.host))
+        {
+          val = mipi_dsi_host_ll_gen_read_payload_fifo(priv->hal.host);
+          ret = 1;
+          break;
+        }
+
+      if (!mipi_dsi_host_ll_gen_is_read_cmd_busy(priv->hal.host) &&
+          mipi_dsi_host_ll_gen_is_read_fifo_empty(priv->hal.host))
+        {
+          /* Command completed but no data — panel did not respond. */
+
+          ret = -ENODATA;
+          break;
+        }
+    }
+
+  /* Disable BTA immediately after the read. */
+
+  mipi_dsi_host_ll_enable_bta(priv->hal.host, false);
+
+  if (ret > 0)
+    {
+      /* The RX FIFO word contains up to 4 bytes in little-endian order. */
+
+      size_t ncopy = max_len < 4 ? max_len : 4;
+      memcpy(buf, &val, ncopy);
+      syslog(LOG_INFO,
+             "MIPI: DCS read cmd=%02x data=%02x %02x %02x %02x\n",
+             cmd, buf[0],
+             ncopy > 1 ? buf[1] : 0, ncopy > 2 ? buf[2] : 0,
+             ncopy > 3 ? buf[3] : 0);
+    }
+  else
+    {
+      syslog(LOG_ERR,
+             "MIPI: DCS read cmd=%02x failed ret=%d "
+             "int_st0=%08lx int_st1=%08lx phy=%08lx\n",
+             cmd, ret,
+             (unsigned long)priv->hal.host->int_st0.val,
+             (unsigned long)priv->hal.host->int_st1.val,
+             (unsigned long)priv->hal.host->phy_status.val);
+    }
+
+  /* Drain the RX FIFO and clear any residual interrupt flags so they do not
+   * affect the subsequent video mode operation.
+   */
+
+  while (!mipi_dsi_host_ll_gen_is_read_fifo_empty(priv->hal.host))
+    {
+      (void)mipi_dsi_host_ll_gen_read_payload_fifo(priv->hal.host);
+    }
+
+  /* Write-1-to-clear on interrupt status registers. */
+
+  priv->hal.host->int_st0.val = priv->hal.host->int_st0.val;
+  priv->hal.host->int_st1.val = priv->hal.host->int_st1.val;
+
+  return ret;
 }
 
 static int esp_dsi_dma_submit(struct esp_dsi_s *priv)
@@ -501,7 +642,8 @@ static int esp_dsi_hardware_initialize(struct esp_dsi_s *priv)
    */
 
   mipi_dsi_host_ll_enable_te_ack(priv->hal.host, false);
-  mipi_dsi_host_ll_enable_cmd_ack(priv->hal.host, true);
+  mipi_dsi_host_ll_enable_cmd_ack(priv->hal.host, false);
+  mipi_dsi_host_ll_enable_bta(priv->hal.host, false);
   mipi_dsi_host_ll_set_gen_short_wr_speed_mode(
     priv->hal.host, 0, MIPI_DSI_LL_TRANS_SPEED_LP);
   mipi_dsi_host_ll_set_gen_short_wr_speed_mode(
@@ -555,17 +697,43 @@ static int esp_dsi_hardware_initialize(struct esp_dsi_s *priv)
   syslog(LOG_INFO, "MIPI: configuring EK79007 reset GPIO%d\n",
          BOARD_LCD_RST);
   esp_configgpio(BOARD_LCD_RST, OUTPUT);
+
+  /* EK79007 requires the DSI lanes to remain in LP11 around GRB and needs
+   * at least 55 ms after GRB is released before accepting initialization
+   * commands.  Use conservative margins because the panel rails are supplied
+   * independently from the ESP32-P4 DPHY LDO.
+   */
+
+  esp_gpiowrite(BOARD_LCD_RST, true);
+  syslog(LOG_INFO, "MIPI: waiting for EK79007 power/reset stabilization\n");
+  up_udelay(20000);
   syslog(LOG_INFO, "MIPI: driving EK79007 reset low\n");
   esp_gpiowrite(BOARD_LCD_RST, false);
   syslog(LOG_INFO, "MIPI: waiting after EK79007 reset assert\n");
-  up_udelay(10000);
+  up_udelay(30000);
   syslog(LOG_INFO, "MIPI: driving EK79007 reset high\n");
   esp_gpiowrite(BOARD_LCD_RST, true);
   syslog(LOG_INFO, "MIPI: waiting after EK79007 reset release\n");
-  up_udelay(20000);
+  up_udelay(120000);
   syslog(LOG_INFO, "MIPI: EK79007 reset complete\n");
 
+  /* Prime the LP command path with a standard DCS NOP before accessing
+   * vendor registers.  This is harmless to the panel state and makes the
+   * first vendor write occur only after a completed LP transaction.
+   */
+
+  ret = esp_dsi_dcs(0x00, NULL, 0);
+  if (ret < 0)
+    {
+      return ret;
+    }
+
+  up_udelay(2000);
   ret = esp_dsi_dcs(0xb2, (const uint8_t[]){0x10}, 1);
+#if LCD_EK79007_BIST
+  ret |= esp_dsi_dcs(0xb1, (const uint8_t[]){0x08}, 1);
+  syslog(LOG_INFO, "MIPI: EK79007 internal BIST enabled\n");
+#endif
   ret |= esp_dsi_dcs(0x80, (const uint8_t[]){0x8b}, 1);
   ret |= esp_dsi_dcs(0x81, (const uint8_t[]){0x78}, 1);
   ret |= esp_dsi_dcs(0x82, (const uint8_t[]){0x84}, 1);
@@ -589,6 +757,26 @@ static int esp_dsi_hardware_initialize(struct esp_dsi_s *priv)
 
   up_udelay(20000);
 
+  /* Diagnostic: read display ID and power mode to verify the panel is
+   * actually responding to commands.  This is a single-shot read that
+   * enables BTA only for the duration of the call and cleans up afterward.
+   */
+
+  {
+    uint8_t id[4] = {0};
+    uint8_t pwr = 0;
+    int r;
+
+    r = esp_dsi_read_dcs_cmd(priv, 0x04, id, sizeof(id));
+    syslog(r > 0 ? LOG_INFO : LOG_WARNING,
+           "MIPI: Display ID read: ret=%d id=%02x %02x %02x %02x\n",
+           r, id[0], id[1], id[2], id[3]);
+
+    r = esp_dsi_read_dcs_cmd(priv, 0x0a, &pwr, 1);
+    syslog(r > 0 ? LOG_INFO : LOG_WARNING,
+           "MIPI: Power mode read: ret=%d val=%02x\n", r, pwr);
+  }
+
   priv->hal.expect_dpi_clock_freq_mhz = 48.0f;
   div = mipi_dsi_hal_host_dpi_calculate_divider(&priv->hal, 240.0f, 48.0f);
   flags = up_irq_save();
@@ -604,11 +792,11 @@ static int esp_dsi_hardware_initialize(struct esp_dsi_s *priv)
   mipi_dsi_host_ll_dpi_set_vcid(priv->hal.host, 0);
 
   /* ESP32-P4 v3.x exposes separate requested and active video registers.
-   * Explicitly enable the shadow bank before programming video timing, then
-   * request that the complete bank be committed when video starts.
+   * Disable shadow to write directly to active registers, avoiding
+   * potential issues with shadow commit not completing before video start.
    */
 
-  priv->hal.host->vid_shadow_ctrl.vid_shadow_en = 1;
+  priv->hal.host->vid_shadow_ctrl.vid_shadow_en = 0;
   mipi_dsi_host_ll_dpi_set_color_coding(priv->hal.host,
                                          LCD_COLOR_FMT_RGB888, 0);
   mipi_dsi_host_ll_dpi_set_timing_polarity(priv->hal.host, false, false,
@@ -656,22 +844,22 @@ static int esp_dsi_hardware_initialize(struct esp_dsi_s *priv)
   mipi_dsi_brg_ll_enable_dpi_output(priv->hal.bridge, false);
   mipi_dsi_brg_ll_update_dpi_config(priv->hal.bridge);
 
-  /* Do not make video progress depend on a per-frame response.  Use the
-   * official automatic clock-lane and LP blanking configuration; forcing HS
-   * after a BTA diagnostic caused LP contention and only edge artifacts.
+  /* Do not make video progress depend on a per-frame response.  Force CLK
+   * lane to stay in HS mode and disable LP blanking to rule out LP/HS
+   * transition issues that may prevent the panel from receiving video data.
    */
 
   mipi_dsi_host_ll_dpi_enable_frame_ack(priv->hal.host, false);
   mipi_dsi_host_ll_dpi_enable_lp_horizontal_timing(priv->hal.host,
-                                                    true, true);
+                                                    false, false);
   mipi_dsi_host_ll_dpi_enable_lp_vertical_timing(priv->hal.host,
-                                                  true, true, true, true);
-  mipi_dsi_host_ll_dpi_enable_lp_command(priv->hal.host, true);
+                                                  false, false, false, false);
+  mipi_dsi_host_ll_dpi_enable_lp_command(priv->hal.host, false);
   mipi_dsi_host_ll_set_clock_lane_state(
-    priv->hal.host, MIPI_DSI_LL_CLOCK_LANE_STATE_AUTO);
+    priv->hal.host, MIPI_DSI_LL_CLOCK_LANE_STATE_HS);
+  syslog(LOG_INFO, "MIPI: forced HS video mode (no LP blanking)\n");
   mipi_dsi_host_ll_dpi_set_pattern_type(priv->hal.host,
                                          MIPI_DSI_PATTERN_BAR_VERTICAL);
-  priv->hal.host->vid_shadow_ctrl.vid_shadow_req = 1;
   mipi_dsi_host_ll_enable_video_mode(priv->hal.host, true);
   up_udelay(100000);
   syslog(LOG_INFO,
