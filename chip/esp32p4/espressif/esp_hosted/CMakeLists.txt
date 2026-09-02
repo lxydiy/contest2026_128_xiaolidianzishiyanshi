@@ -33,7 +33,7 @@ set(ESP_HOSTED_REPO_NAME esp-hosted-mcu)
 if(DEFINED ENV{ESP_HOSTED_URL})
   set(ESP_HOSTED_URL $ENV{ESP_HOSTED_URL})
 else()
-  set(ESP_HOSTED_URL "https://github.com/espressif/esp-hosted-mcu.git")
+  set(ESP_HOSTED_URL "http://127.0.0.1:3000/espressif/esp-hosted-mcu.git")
 endif()
 
 if(DEFINED ENV{ESP_HOSTED_VERSION})

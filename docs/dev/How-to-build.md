@@ -17,6 +17,7 @@ rm -rf cmake_out/esp32p4-function-ev-board_nsh/ && ./build.sh vendor/espressif/b
 
 烧录：
 ```bash
+export PATH=$PATH:/home/lxy/openvela/prebuilts/gcc/linux-x86_64/riscv-none-elf/bin
 ESPTOOL_PORT=/dev/ttyACM0 cmake --build cmake_out/esp32p4-function-ev-board_nsh --target flash
 ```
 

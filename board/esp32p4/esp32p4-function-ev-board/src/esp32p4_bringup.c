@@ -100,6 +100,14 @@
 #  include "esp_board_mcpwm.h"
 #endif
 
+#ifdef CONFIG_ESP32P4_SDMMC
+#  include "esp32p4_board_sdmmc.h"
+#endif
+
+#ifdef CONFIG_ESP_HOSTED
+#  include "esp32p4_board_esp_hosted.h"
+#endif
+
 #ifdef CONFIG_ESP_PCNT
 #  include "espressif/esp_pcnt.h"
 #  include "esp_board_pcnt.h"
@@ -543,6 +551,22 @@ int esp_bringup(void)
    * at least enough succeeded to bring-up NSH with perhaps reduced
    * capabilities.
    */
+
+#ifdef CONFIG_ESP32P4_SDMMC
+  ret = board_sdmmc_initialize();
+  if (ret < 0)
+    {
+      syslog(LOG_ERR, "ERROR: board_sdmmc_initialize failed: %d\n", ret);
+    }
+#endif
+
+#ifdef CONFIG_ESP_HOSTED
+  ret = board_esp_hosted_initialize();
+  if (ret < 0)
+    {
+      syslog(LOG_ERR, "ERROR: board_esp_hosted_initialize failed: %d\n", ret);
+    }
+#endif
 
   return ret;
 }
