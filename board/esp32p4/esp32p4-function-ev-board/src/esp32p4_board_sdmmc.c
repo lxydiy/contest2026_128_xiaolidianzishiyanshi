@@ -26,13 +26,16 @@
 
 #include <nuttx/config.h>
 
+#include <errno.h>
 #include <sys/types.h>
 #include <syslog.h>
 
+#include <nuttx/arch.h>
 #include <nuttx/mmcsd.h>
 #include <nuttx/sdio.h>
 
 #include "espressif/esp_gpio.h"
+#include "esp_ldo_regulator.h"
 #include "esp32p4_sdmmc.h"
 #include <arch/chip/gpio_sig_map.h>
 
@@ -49,9 +52,54 @@
 #define BOARD_SDMMC_SLOT1_D2   CONFIG_ESP32P4_SDMMC_SLOT1_PIN_D2
 #define BOARD_SDMMC_SLOT1_D3   CONFIG_ESP32P4_SDMMC_SLOT1_PIN_D3
 
+/* The Function-EV-Board routes the slot 0 I/O bank and TF-card supply to
+ * the ESP32-P4 internal GP LDO VO4.  Keep the handle for the lifetime of
+ * the SDMMC device so that the regulator remains enabled.
+ */
+
+#ifdef CONFIG_ESP32P4_SDMMC_SLOT0
+#  define BOARD_SDMMC_LDO_CHANNEL  4
+#  define BOARD_SDMMC_LDO_MV       3300
+
+static esp_ldo_channel_handle_t g_sdmmc_ldo;
+#endif
+
 /****************************************************************************
  * Private Functions
  ****************************************************************************/
+
+#ifdef CONFIG_ESP32P4_SDMMC_SLOT0
+static int esp32p4_sdmmc_slot0_enable_power(void)
+{
+  const esp_ldo_channel_config_t config =
+  {
+    .chan_id = BOARD_SDMMC_LDO_CHANNEL,
+    .voltage_mv = BOARD_SDMMC_LDO_MV,
+  };
+  int ret;
+
+  if (g_sdmmc_ldo != NULL)
+    {
+      return OK;
+    }
+
+  ret = esp_ldo_acquire_channel(&config, &g_sdmmc_ldo);
+  if (ret != 0)
+    {
+      syslog(LOG_ERR, "ERROR: Failed to enable SDMMC VO4 LDO: %d\n", ret);
+      return -EIO;
+    }
+
+  /* Allow the TF-card supply and the I/O rail to settle before any pin is
+   * driven or the controller emits the initial clock cycles.
+   */
+
+  up_mdelay(10);
+  syslog(LOG_INFO, "SDMMC slot 0 VO4 LDO enabled at %d mV\n",
+         BOARD_SDMMC_LDO_MV);
+  return OK;
+}
+#endif
 
 #ifdef CONFIG_ESP32P4_SDMMC_SLOT1
 /****************************************************************************
@@ -157,6 +205,12 @@ int board_sdmmc_initialize(void)
 
 #if CONFIG_ESP32P4_SDMMC_SLOT0
   /* Slot 0: TF card (IOMUX, chip driver configures pins) */
+
+  ret = esp32p4_sdmmc_slot0_enable_power();
+  if (ret < 0)
+    {
+      return ret;
+    }
 
   sdio = sdio_initialize(0);
   if (sdio == NULL)

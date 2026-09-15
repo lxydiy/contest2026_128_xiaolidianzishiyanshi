@@ -52,7 +52,7 @@ extern "C"
  *   Initialize SDIO for operation.
  *
  * Input Parameters:
- *   slotno - Not used.
+ *   slotno - SDMMC slot number (0 for IOMUX, 1 for GPIO matrix).
  *
  * Returned Value:
  *   A reference to an SDIO interface structure.  NULL is returned on

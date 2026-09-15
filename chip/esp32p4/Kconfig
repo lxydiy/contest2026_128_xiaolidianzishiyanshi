@@ -195,7 +195,11 @@ config P4_REV3_MSPI_WORKAROUND_SIZE
 menuconfig ESP32P4_SDMMC
 	bool "ESP32P4 SDMMC Host Controller"
 	default n
+	depends on SCHED_WORKQUEUE && SCHED_HPWORK
 	select ARCH_HAVE_SDIO
+	select SDIO_DMA if MMCSD
+	select SDIO_BLOCKSETUP if MMCSD_SDIO
+	select SDIO_MUXBUS if MMCSD_SDIO
 	---help---
 		Enable the ESP32P4 SDMMC host controller driver.  This driver
 		implements the NuttX SDIO interface (struct sdio_dev_s) for the
