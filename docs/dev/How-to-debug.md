@@ -17,7 +17,7 @@ riscv-none-elf-addr2line  -e ./nuttx -f -C 0x400172ba
 ## 动态调试
 
 ### 启动OpenOCD
-
+（需要安装esp-idf并运行`. <IDF路径>/export.sh`）
 ```bash
 openocd -f board/esp32p4-builtin.cfg -c init -c "reset halt" -c "esp appimage_offset 0x2000"
 ```
