@@ -36,7 +36,11 @@
 #include <nuttx/nuttx.h>
 #include <nuttx/irq.h>
 #include <nuttx/arch.h>
+#include <nuttx/kmalloc.h>
+#include <nuttx/mutex.h>
+#include <nuttx/semaphore.h>
 #include <nuttx/spinlock.h>
+#include <nuttx/wqueue.h>
 
 #include "riscv_internal.h"
 
